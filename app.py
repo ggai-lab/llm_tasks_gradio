@@ -52,12 +52,12 @@ with gr.Blocks() as demo:
     gr.Markdown("Text-based generation or Code-based generation using this demo.")
     with gr.Tab("Text-based generation"):
         text_input =gr.Textbox(label="message")
-        text_output =gr.Textbox(label="output") # 큰 채팅창으로 구성
+        text_output =gr.Textbox(label="output") # 변경
         parameter_box = gr.CheckboxGroup(["", "", ""])
         text_button = gr.Button("send")
     with gr.Tab("Code-based generation"):
         code_input =gr.Textbox(label="message")
-        code_output =gr.Textbox(label="output") # 큰 채팅창으로 구성
+        code_output =gr.Textbox(label="output") #  변경
         code_button = gr.Button("send")
     with gr.Accordion(""):
         gr.Markdown("")
