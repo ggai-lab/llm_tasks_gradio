@@ -4,7 +4,7 @@ from typing import Optional
 @dataclass
 class TrainArguments(object):
     model_name_or_path: Optional[str] = field(
-        default="TheBloke/Llama-2-7b-Chat-GPTQ",
+        default="meta-llama/Llama-2-7b",
         metadata={"help": "model_name_or_path"},
     )
     model_basename: Optional[str] = field(
