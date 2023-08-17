@@ -1,281 +1,138 @@
-import os
-from typing import Iterator, List, Tuple
 import torch
+from peft import PeftModel
+import transformers
 import gradio as gr
-from distutils.util import strtobool
-import transformers.utils
-from configs import TrainArguments
-from transformers import AutoTokenizer, pipeline, logging, HfArgumentParser
-from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
-
-parser = HfArgumentParser(TrainArguments)    
-args = parser.parse_args_into_dataclasses()[0]  
-
-# model = model(
-#     model_path=args.MODEL_PATH,
-#     backend_type=args.BACKEND_TYPE,
-#     max_tokens=args.MAX_INPUT_TOKEN_LENGTH,
-#     load_in_8bit=args.LOAD_IN_8BIT,
-#     # verbose=True,
-# )
-
-print("Step 0: Load model.")
-use_triton = False
-tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=True)
-model = AutoGPTQForCausalLM.from_quantized(args.model_name_or_path,
-        model_basename=args.model_basename,
-        use_safetensors=True,
-        trust_remote_code=True,
-        device="cpu",
-        use_triton=use_triton,
-        quantize_config=None)
-
-def clear_and_save_textbox(message: str) -> tuple[str, str]:
-    return "", message
+from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 
 
-def display_input(
-    message: str, history: list[tuple[str, str]]
-) -> list[tuple[str, str]]:
-    history.append((message, ""))
-    return history
+BASE_MODEL = "meta-llama/Llama-2-7b-chat-hf"
+LORA_WEIGHTS = "davidkim205/komt-Llama-2-7b-chat-hf-lora" 
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
 
 
-def delete_prev_fn(history: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], str]:
-    try:
-        message, _ = history.pop()
-    except IndexError:
-        message = ""
-    return history, message or ""
+if torch.cuda.is_available():
+    device = "cuda"
+else:
+    device = "cpu"
+
+try:
+    if torch.backends.mps.is_available():
+        device = "mps"
+except:
+    pass
 
 
-def generate(
-    message: str,
-    history_with_input: list[tuple[str, str]],
-    system_prompt: str,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    top_k: int,
-) -> Iterator[list[tuple[str, str]]]:
-    if max_new_tokens > args.MAX_MAX_NEW_TOKENS:
-        raise ValueError
-
-    history = history_with_input[:-1]
-    generator = model.run(
-        message, history, system_prompt, max_new_tokens, temperature, top_p, top_k
+if device == "cuda":
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL,
+        load_in_8bit=False,
+        torch_dtype=torch.float16,
+        device_map="auto",
     )
-    try:
-        first_response = next(generator)
-        yield history + [(message, first_response)]
-    except StopIteration:
-        yield history + [(message, "")]
-    for response in generator:
-        yield history + [(message, response)]
-
-
-def process_example(message: str) -> tuple[str, list[tuple[str, str]]]:
-    generator = generate(message, [], args.DEFAULT_SYSTEM_PROMPT, 1024, 1, 0.95, 50)
-    for x in generator:
-        pass
-    return "", x
-
-
-def check_input_token_length(
-    message: str, chat_history: list[tuple[str, str]], system_prompt: str
-) -> None:
-    input_token_length = model.get_input_token_length(
-        message, chat_history, system_prompt
+    model = PeftModel.from_pretrained(
+        model, LORA_WEIGHTS, torch_dtype=torch.float16, force_download=True
     )
-    if input_token_length > args.MAX_INPUT_TOKEN_LENGTH:
-        raise gr.Error(
-            f"The accumulated input is too long ({input_token_length} > {args.MAX_INPUT_TOKEN_LENGTH}). Clear your chat history and try again."
-        )
-
-
-with gr.Blocks(css="style.css") as demo:
-    print("Step 1: Gradio start.")
-    gr.Markdown(args.DESCRIPTION)
-
-    with gr.Group():
-        chatbot = gr.Chatbot(label="Chatbot")
-        with gr.Row():
-            textbox = gr.Textbox(
-                container=False,
-                show_label=False,
-                placeholder="Type a message.",
-                scale=10,
-            )
-            submit_button = gr.Button("Submit", variant="primary", scale=1, min_width=0)
-    with gr.Row():
-        retry_button = gr.Button("🔄  Retry", variant="secondary")
-        undo_button = gr.Button("↩️ Undo", variant="secondary")
-        clear_button = gr.Button("🗑️  Clear", variant="secondary")
-
-    saved_input = gr.State()
-
-    with gr.Accordion(label="Advanced options", open=False):
-        system_prompt = gr.Textbox(
-            label="System prompt", value=args.DEFAULT_SYSTEM_PROMPT, lines=6
-        )
-        max_new_tokens = gr.Slider(
-            label="Max new tokens",
-            minimum=1,
-            maximum=args.MAX_MAX_NEW_TOKENS,
-            step=1,
-            value=args.DEFAULT_MAX_NEW_TOKENS,
-        )
-        temperature = gr.Slider(
-            label="Temperature",
-            minimum=0.1,
-            maximum=4.0,
-            step=0.1,
-            value=1.0,
-        )
-        top_p = gr.Slider(
-            label="Top-p (nucleus sampling)",
-            minimum=0.05,
-            maximum=1.0,
-            step=0.05,
-            value=0.95,
-        )
-        top_k = gr.Slider(
-            label="Top-k",
-            minimum=1,
-            maximum=1000,
-            step=1,
-            value=50,
-        )
-
-    gr.Examples(
-        examples=[
-            "Hi! How are you doing?",
-            "Can you explain briefly to me what is the Python programming language?",
-            "Explain the plot of Cinderella in a sentence.",
-            "How many hours does it take a man to eat a Helicopter?",
-            "Write a 100-word article on 'Benefits of Open-Source in AI research'",
-        ],
-        inputs=textbox,
-        outputs=[textbox, chatbot],
-        fn=process_example,
-        cache_examples=True,
+elif device == "mps":
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL,
+        device_map={"": device},
+        torch_dtype=torch.float16,
+    )
+    model = PeftModel.from_pretrained(
+        model,
+        LORA_WEIGHTS,
+        device_map={"": device},
+        torch_dtype=torch.float16,
+    )
+else:
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL, device_map={"": device}, low_cpu_mem_usage=True
+    )
+    model = PeftModel.from_pretrained(
+        model,
+        LORA_WEIGHTS,
+        device_map={"": device},
     )
 
-    textbox.submit(
-        fn=clear_and_save_textbox,
-        inputs=textbox,
-        outputs=[textbox, saved_input],
-        api_name=False,
-        queue=False,
-    ).then(
-        fn=display_input,
-        inputs=[saved_input, chatbot],
-        outputs=chatbot,
-        api_name=False,
-        queue=False,
-    ).then(
-        fn=check_input_token_length,
-        inputs=[saved_input, chatbot, system_prompt],
-        api_name=False,
-        queue=False,
-    ).success(
-        fn=generate,
-        inputs=[
-            saved_input,
-            chatbot,
-            system_prompt,
-            max_new_tokens,
-            temperature,
-            top_p,
-            top_k,
-        ],
-        outputs=chatbot,
-        api_name=False,
-    )
 
-    button_event_preprocess = (
-        submit_button.click(
-            fn=clear_and_save_textbox,
-            inputs=textbox,
-            outputs=[textbox, saved_input],
-            api_name=False,
-            queue=False,
+def generate_prompt(instruction, input=None):
+    if input:
+        return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+### Instruction:
+{instruction}
+### Input:
+{input}
+### Response:"""
+    else:
+        return f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.
+### Instruction:
+{instruction}
+### Response:"""
+
+if device != "cpu":
+    model.half()
+model.eval()
+if torch.__version__ >= "2":
+    model = torch.compile(model)
+
+
+def evaluate(
+    instruction,
+    input=None,
+    temperature=0.1,
+    top_p=0.75,
+    top_k=40,
+    num_beams=4,
+    max_new_tokens=128,
+    **kwargs,
+):
+    if instruction == '' or instruction == None:
+        return 'Instruction not found. Please enter your instruction.'
+    prompt = generate_prompt(instruction, input)
+    inputs = tokenizer(prompt, return_tensors="pt")
+    input_ids = inputs["input_ids"].to(device)
+    generation_config = GenerationConfig(
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        num_beams=num_beams,
+        **kwargs,
+    )
+    with torch.no_grad():
+        generation_output = model.generate(
+            input_ids=input_ids,
+            generation_config=generation_config,
+            return_dict_in_generate=True,
+            output_scores=True,
+            max_new_tokens=max_new_tokens,
         )
-        .then(
-            fn=display_input,
-            inputs=[saved_input, chatbot],
-            outputs=chatbot,
-            api_name=False,
-            queue=False,
+    s = generation_output.sequences[0]
+    output = tokenizer.decode(s)
+    return output.split("### Response:")[1].strip().replace('</s>', '')
+
+
+g = gr.Interface(
+    fn=evaluate,
+    inputs=[
+        gr.components.Textbox(
+            lines=2, label="Instruction"),
+        gr.components.Textbox(lines=2, label="Input"),
+        gr.components.Slider(minimum=0, maximum=1, value=0.1, label="Temperature"),
+        gr.components.Slider(minimum=0, maximum=1, value=0.75, label="Top p"),
+        gr.components.Slider(minimum=0, maximum=100, step=1, value=40, label="Top k"),
+        gr.components.Slider(minimum=1, maximum=4, step=1, value=4, label="Beams"),
+        gr.components.Slider(
+            minimum=1, maximum=1000, step=1, value=128, label="Max tokens"
+        ),
+    ],
+    outputs=[
+        gr.inputs.Textbox(
+            lines=5,
+            label="Output",
         )
-        .then(
-            fn=check_input_token_length,
-            inputs=[saved_input, chatbot, system_prompt],
-            api_name=False,
-            queue=False,
-        )
-        .success(
-            fn=generate,
-            inputs=[
-                saved_input,
-                chatbot,
-                system_prompt,
-                max_new_tokens,
-                temperature,
-                top_p,
-                top_k,
-            ],
-            outputs=chatbot,
-            api_name=False,
-        )
-    )
-
-    retry_button.click(
-        fn=delete_prev_fn,
-        inputs=chatbot,
-        outputs=[chatbot, saved_input],
-        api_name=False,
-        queue=False,
-    ).then(
-        fn=display_input,
-        inputs=[saved_input, chatbot],
-        outputs=chatbot,
-        api_name=False,
-        queue=False,
-    ).then(
-        fn=generate,
-        inputs=[
-            saved_input,
-            chatbot,
-            system_prompt,
-            max_new_tokens,
-            temperature,
-            top_p,
-            top_k,
-        ],
-        outputs=chatbot,
-        api_name=False,
-    )
-
-    undo_button.click(
-        fn=delete_prev_fn,
-        inputs=chatbot,
-        outputs=[chatbot, saved_input],
-        api_name=False,
-        queue=False,
-    ).then(
-        fn=lambda x: x,
-        inputs=[saved_input],
-        outputs=textbox,
-        api_name=False,
-        queue=False,
-    )
-
-    clear_button.click(
-        fn=lambda: ([], ""),
-        outputs=[chatbot, saved_input],
-        queue=False,
-        api_name=False,
-    )
-
-demo.queue(max_size=20).launch()
+    ],
+    title="Llama2_7b_chat_Lora",
+    description="Llama-2-7b-chat-LoRA is a multi-purpose large language model.",
+)
+g.queue(concurrency_count=1)
+g.launch(share=True)
